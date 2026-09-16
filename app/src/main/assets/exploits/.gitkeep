@@ -1,0 +1,47 @@
+name: Build GhostLock Sabrina (Chromecast)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clone ghostlock-sabrina
+        run: git clone --depth=1 https://github.com/k-o-n-t-o-r/ghostlock-sabrina.git ghostlock-sabrina
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
+      - name: Build binary
+        run: |
+          cd ghostlock-sabrina
+          export ANDROID_NDK_HOME=$ANDROID_NDK_ROOT
+          make -j$(nproc)
+          file ghostlock
+          ls -lh ghostlock
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostlock-sabrina
+          path: ghostlock-sabrina/ghostlock
+          retention-days: 30
+
+      - name: Commit to repo
+        run: |
+          mkdir -p app/src/main/assets/exploits
+          cp ghostlock-sabrina/ghostlock app/src/main/assets/exploits/ghostlock_sabrina
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add app/src/main/assets/exploits/ghostlock_sabrina
+          git diff --staged --quiet || git commit -m "Auto-build: GhostLock Sabrina for Chromecast"
+          git push
